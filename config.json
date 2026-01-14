@@ -1,0 +1,6 @@
+{
+  "image_path": "captcha.png",
+  "correct_answer": "5",
+  "button_options": ["15", "7", "8", "10", "12", "5", "16", "11", "2"],
+  "welcome_message": "Bienvenue sur le chat DDC ! Résolvez ce captcha pour accéder au chat (3 tentatives, 1h max)"
+}
