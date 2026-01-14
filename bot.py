@@ -5,7 +5,7 @@ import asyncio
 import logging
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, ChatMemberHandler, CallbackQueryHandler, ContextTypes
+from telegram.ext import Application, ChatMemberHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 from telegram.constants import ChatMemberStatus
 
 # Logging
@@ -103,7 +103,7 @@ async def new_member_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # Schedule timeout kick (1 hour)
     context.job_queue.run_once(
         timeout_kick,
-        3600,
+        60,
         data={'chat_id': chat_id, 'user_id': user_id},
         name=f"timeout_{user_id}"
     )
@@ -210,6 +210,13 @@ async def timeout_kick(context: ContextTypes.DEFAULT_TYPE):
         
         logger.info(f"User {user_id} timed out (1h). Banned for 24h.")
 
+# Delete service messages
+async def delete_service_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        await update.message.delete()
+    except Exception as e:
+        logger.error(f"Failed to delete service message: {e}")
+
 def main():
     token = os.environ.get('TELEGRAM_TOKEN')
     if not token:
@@ -217,10 +224,11 @@ def main():
     
     application = Application.builder().token(token).build()
     
-    # Handlers
+   # Handlers
     application.add_handler(ChatMemberHandler(new_member_handler, ChatMemberHandler.CHAT_MEMBER))
     application.add_handler(CallbackQueryHandler(captcha_callback, pattern=r'^captcha_'))
-    
+    application.add_handler(MessageHandler(filters.StatusUpdate.ALL, delete_service_messages))
+
     logger.info("Bot Damoclès démarré.")
     application.run_polling(allowed_updates=['chat_member', 'callback_query'])
 
