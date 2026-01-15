@@ -4,6 +4,8 @@ import csv
 import asyncio
 import logging
 from datetime import datetime, timedelta
+from threading import Thread
+from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, ChatMemberHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 from telegram.constants import ChatMemberStatus
@@ -16,6 +18,26 @@ logger = logging.getLogger(__name__)
 CONFIG_FILE = "config.json"
 ATTEMPTS_FILE = "attempts.json"
 BLACKLIST_FILE = "blacklist.csv"
+
+# Flood control
+CAPTCHA_DELAY = 3  # seconds between each captcha
+MAX_PENDING_CAPTCHAS = 20  # maximum simultaneous captchas
+last_captcha_time = 0
+
+# Flask keep-alive server
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Bot Damoclès is running!"
+
+def run_flask():
+    app.run(host='0.0.0.0', port=8080)
+
+def keep_alive():
+    thread = Thread(target=run_flask)
+    thread.daemon = True
+    thread.start()
 
 # Load config
 def load_config():
@@ -42,8 +64,10 @@ def save_attempts(attempts):
     with open(ATTEMPTS_FILE, 'w') as f:
         json.dump(attempts, f, indent=2)
 
-# Handle new member
+# Handle new member with flood control
 async def new_member_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global last_captcha_time
+    
     chat_member = update.chat_member
     
     # Only handle new members joining
@@ -59,8 +83,31 @@ async def new_member_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # Check blacklist
     blacklist = load_blacklist()
     if user_id in blacklist:
-        logger.info(f"Blacklisted user {user_id} attempted to join. Banning.")
+        logger.info(f"Blacklisted user {user_id} attempted to join. Banning permanently.")
         await context.bot.ban_chat_member(chat_id, user_id, until_date=datetime.now() + timedelta(days=365))
+        return
+    
+    # Flood control: if too many pending captchas, temporary kick
+    attempts = load_attempts()
+    if len(attempts) >= MAX_PENDING_CAPTCHAS:
+        logger.warning(f"Flood mode: {len(attempts)} pending captchas. Temporary 1min kick for user {user_id}.")
+        try:
+            username_display = f"@{user.username}" if user.username else user.first_name
+            message = await context.bot.send_message(
+                chat_id,
+                f"⏳ Trop de demandes simultanées. {username_display}, réessayez dans 1 minute."
+            )
+            # Delete message after 5 seconds
+            await asyncio.sleep(5)
+            await context.bot.delete_message(chat_id, message.message_id)
+        except Exception as e:
+            logger.error(f"Failed to send flood message: {e}")
+        
+        await context.bot.ban_chat_member(
+            chat_id,
+            user_id,
+            until_date=datetime.now() + timedelta(minutes=1)
+        )
         return
     
     # Restrict user immediately
@@ -69,6 +116,14 @@ async def new_member_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         user_id,
         permissions={'can_send_messages': False}
     )
+    
+    # Flood control: wait between captchas to avoid Telegram rate limits
+    current_time = asyncio.get_event_loop().time()
+    time_since_last = current_time - last_captcha_time
+    if time_since_last < CAPTCHA_DELAY:
+        await asyncio.sleep(CAPTCHA_DELAY - time_since_last)
+    
+    last_captcha_time = asyncio.get_event_loop().time()
     
     # Load config
     config = load_config()
@@ -83,16 +138,25 @@ async def new_member_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     keyboard = InlineKeyboardMarkup(buttons)
     
     # Send captcha
-    with open(config['image_path'], 'rb') as photo:
-        message = await context.bot.send_photo(
+    try:
+        with open(config['image_path'], 'rb') as photo:
+            message = await context.bot.send_photo(
+                chat_id,
+                photo,
+                caption=config['welcome_message'],
+                reply_markup=keyboard
+            )
+    except Exception as e:
+        logger.error(f"Failed to send captcha to {user_id}: {e}")
+        # If captcha fails to send, kick the user for safety
+        await context.bot.ban_chat_member(
             chat_id,
-            photo,
-            caption=config['welcome_message'],
-            reply_markup=keyboard
+            user_id,
+            until_date=datetime.now() + timedelta(hours=24)
         )
+        return
     
     # Store attempt data
-    attempts = load_attempts()
     attempts[str(user_id)] = {
         'tries': 0,
         'message_id': message.message_id,
@@ -100,7 +164,7 @@ async def new_member_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     }
     save_attempts(attempts)
     
-    # Schedule timeout kick (1 hour)
+    # Schedule timeout kick (1 minute)
     context.job_queue.run_once(
         timeout_kick,
         60,
@@ -148,7 +212,10 @@ async def captcha_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         
         # Delete captcha message
-        await context.bot.delete_message(chat_id, attempts[user_key]['message_id'])
+        try:
+            await context.bot.delete_message(chat_id, attempts[user_key]['message_id'])
+        except Exception as e:
+            logger.error(f"Failed to delete captcha message: {e}")
         
         # Remove from attempts and cancel timeout
         del attempts[user_key]
@@ -170,7 +237,11 @@ async def captcha_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             save_attempts(attempts)
         else:
             # Out of tries - kick and ban 24h
-            await context.bot.delete_message(chat_id, attempts[user_key]['message_id'])
+            try:
+                await context.bot.delete_message(chat_id, attempts[user_key]['message_id'])
+            except Exception as e:
+                logger.error(f"Failed to delete captcha message: {e}")
+            
             await context.bot.ban_chat_member(
                 chat_id,
                 target_user_id,
@@ -187,7 +258,7 @@ async def captcha_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             logger.info(f"User {target_user_id} failed captcha 3 times. Banned for 24h.")
 
-# Timeout kick after 1 hour
+# Timeout kick after 1 minute
 async def timeout_kick(context: ContextTypes.DEFAULT_TYPE):
     data = context.job.data
     chat_id = data['chat_id']
@@ -198,7 +269,11 @@ async def timeout_kick(context: ContextTypes.DEFAULT_TYPE):
     
     if user_key in attempts:
         # Still hasn't answered - kick and ban 24h
-        await context.bot.delete_message(chat_id, attempts[user_key]['message_id'])
+        try:
+            await context.bot.delete_message(chat_id, attempts[user_key]['message_id'])
+        except Exception as e:
+            logger.error(f"Failed to delete timeout captcha message: {e}")
+        
         await context.bot.ban_chat_member(
             chat_id,
             user_id,
@@ -208,7 +283,7 @@ async def timeout_kick(context: ContextTypes.DEFAULT_TYPE):
         del attempts[user_key]
         save_attempts(attempts)
         
-        logger.info(f"User {user_id} timed out (1h). Banned for 24h.")
+        logger.info(f"User {user_id} timed out (1min). Banned for 24h.")
 
 # Delete service messages
 async def delete_service_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -222,15 +297,19 @@ def main():
     if not token:
         raise ValueError("TELEGRAM_TOKEN environment variable not set")
     
+    # Start keep-alive server
+    keep_alive()
+    logger.info("Keep-alive server started on port 8080")
+    
     application = Application.builder().token(token).build()
     
-   # Handlers
+    # Handlers
     application.add_handler(ChatMemberHandler(new_member_handler, ChatMemberHandler.CHAT_MEMBER))
     application.add_handler(CallbackQueryHandler(captcha_callback, pattern=r'^captcha_'))
     application.add_handler(MessageHandler(filters.StatusUpdate.ALL, delete_service_messages))
-
+    
     logger.info("Bot Damoclès démarré.")
-    application.run_polling(allowed_updates=['chat_member', 'callback_query'])
+    application.run_polling(allowed_updates=['chat_member', 'callback_query', 'message'])
 
 if __name__ == '__main__':
     main()
