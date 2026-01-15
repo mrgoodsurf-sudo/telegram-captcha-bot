@@ -24,6 +24,9 @@ CAPTCHA_DELAY = 3  # seconds between each captcha
 MAX_PENDING_CAPTCHAS = 20  # maximum simultaneous captchas
 last_captcha_time = 0
 
+# Bot start time (to ignore old events on restart)
+bot_start_time = datetime.now()
+
 # Flask keep-alive server
 app = Flask(__name__)
 
@@ -79,6 +82,17 @@ async def new_member_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     user = chat_member.new_chat_member.user
     chat_id = update.effective_chat.id
     user_id = user.id
+    
+    # Ignore old events (from before bot restart) to avoid retroactive captchas
+    # Check if update has a date (it should always have one)
+    if update.chat_member.date:
+        event_time = update.chat_member.date
+        time_since_event = datetime.now() - event_time
+        
+        # Ignore events older than 2 minutes
+        if time_since_event.total_seconds() > 120:
+            logger.info(f"Ignoring old join event for user {user_id} ({time_since_event.total_seconds():.0f}s old)")
+            return
     
     # Check blacklist
     blacklist = load_blacklist()
