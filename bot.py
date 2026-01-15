@@ -327,4 +327,15 @@ def main():
     application.run_polling(allowed_updates=['chat_member', 'callback_query', 'message'])
 
 if __name__ == '__main__':
-    main()
+    while True:
+        try:
+            main()
+        except KeyboardInterrupt:
+            logger.info("Bot stopped manually (Ctrl+C)")
+            break
+        except Exception as e:
+            logger.error(f"Bot crashed with error: {e}")
+            logger.error("Restarting in 10 seconds...")
+            import time
+            time.sleep(10)
+            logger.info("Attempting restart...")
