@@ -87,7 +87,8 @@ async def new_member_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # Check if update has a date (it should always have one)
     if update.chat_member.date:
         event_time = update.chat_member.date
-        time_since_event = datetime.now() - event_time
+        # Make datetime timezone-aware for comparison (use event's timezone)
+        time_since_event = datetime.now(event_time.tzinfo) - event_time
         
         # Ignore events older than 2 minutes
         if time_since_event.total_seconds() > 120:
