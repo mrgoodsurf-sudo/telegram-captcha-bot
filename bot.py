@@ -324,11 +324,10 @@ async def captcha_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         try:
             fun_msg = await context.bot.send_message(chat_id, fun_text)
-            # Delete after 30 seconds
-            await asyncio.sleep(172800)  # 48 hours (48 * 60 * 60)
-            await context.bot.delete_message(chat_id, fun_msg.message_id)
+            # Schedule deletion in background (non-blocking)
+            asyncio.create_task(delete_fun_message_later(context.bot, chat_id, fun_msg.message_id))
         except Exception as e:
-            logger.error(f"Failed to send/delete fun message: {e}")
+            logger.error(f"Failed to send fun message: {e}")
     
     # Remove from attempts and cancel timeout
     del attempts[user_key]
@@ -374,6 +373,16 @@ async def delete_service_messages(update: Update, context: ContextTypes.DEFAULT_
         await update.message.delete()
     except Exception as e:
         logger.error(f"Failed to delete service message: {e}")
+
+# Background task to delete fun message after 48 hours
+async def delete_fun_message_later(bot, chat_id, message_id):
+    """Delete a message after 48 hours without blocking the main handler"""
+    await asyncio.sleep(172800)  # 48 hours
+    try:
+        await bot.delete_message(chat_id, message_id)
+        logger.info(f"Deleted fun message {message_id} after 48 hours")
+    except Exception as e:
+        logger.error(f"Failed to delete fun message after 48h: {e}")
 
 def main():
     token = os.environ.get('TELEGRAM_TOKEN')
