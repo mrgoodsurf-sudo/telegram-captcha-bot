@@ -266,7 +266,7 @@ async def new_member_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # Schedule timeout kick (1 minute)
     context.job_queue.run_once(
         timeout_kick,
-        90,
+        60,
         data={'chat_id': chat_id, 'user_id': user_id},
         name=f"timeout_{user_id}"
     )
@@ -274,6 +274,9 @@ async def new_member_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 # Handle captcha response
 async def captcha_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    
+    # Immediate feedback to user while processing
+    await query.answer("⏳ Vérification en cours...", show_alert=False)
     
     # Parse callback data
     _, target_user_id, answer = query.data.split('_', 2)  # Use maxsplit=2 to handle answers with underscores
