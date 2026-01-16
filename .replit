@@ -1,0 +1,16 @@
+modules = ["python-3.11"]
+run = "python bot.py"
+entrypoint = "bot.py"
+
+[[ports]]
+localPort = 8080
+externalPort = 80
+
+[nix]
+
+[agent]
+expertMode = true
+
+[deployment]
+run = ["python", "bot.py"]
+deploymentTarget = "cloudrun"

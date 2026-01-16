@@ -51,9 +51,72 @@ def load_config():
 def load_blacklist():
     if not os.path.exists(BLACKLIST_FILE):
         return set()
+    
+    blacklist = set()
+    now = datetime.now()
+    
     with open(BLACKLIST_FILE, 'r', encoding='utf-8') as f:
         reader = csv.DictReader(f)
-        return {int(row['user_id']) for row in reader}
+        for row in reader:
+            try:
+                user_id = int(row['user_id'])
+                expires = row.get('expires', 'PERMANENT').strip().upper()
+                
+                # Check if ban is still active
+                if expires == 'PERMANENT':
+                    blacklist.add(user_id)
+                else:
+                    # Parse expiration date
+                    try:
+                        # Handle both formats: "YYYY-MM-DD HH:MM:SS" and "YYYY-MM-DD"
+                        if ' ' in expires:
+                            expire_date = datetime.strptime(expires, '%Y-%m-%d %H:%M:%S')
+                        elif 'T' in expires:
+                            expire_date = datetime.strptime(expires, '%Y-%m-%dT%H:%M:%S')
+                        else:
+                            expire_date = datetime.strptime(expires, '%Y-%m-%d')
+                        
+                        # Only add if ban hasn't expired yet
+                        if expire_date > now:
+                            blacklist.add(user_id)
+                    except ValueError:
+                        # If date format is invalid, treat as permanent for safety
+                        logger.warning(f"Invalid expires format for user {user_id}: {expires}. Treating as permanent.")
+                        blacklist.add(user_id)
+            except (ValueError, KeyError) as e:
+                logger.error(f"Error reading blacklist row: {e}")
+                continue
+    
+    return blacklist
+
+# Check CAS API
+async def check_cas_ban(user_id: int) -> bool:
+    """
+    Check if user is banned in CAS (Combot Anti-Spam) database.
+    Returns True if banned, False otherwise.
+    """
+    try:
+        import aiohttp
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"https://api.cas.chat/check?user_id={user_id}",
+                timeout=aiohttp.ClientTimeout(total=3)
+            ) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    is_banned = data.get('ok', False)
+                    if is_banned:
+                        logger.info(f"User {user_id} found in CAS database")
+                    return is_banned
+                else:
+                    logger.warning(f"CAS API returned status {response.status}")
+                    return False
+    except asyncio.TimeoutError:
+        logger.warning(f"CAS API timeout for user {user_id}")
+        return False
+    except Exception as e:
+        logger.error(f"CAS API error for user {user_id}: {e}")
+        return False
 
 # Load attempts
 def load_attempts():
@@ -102,6 +165,13 @@ async def new_member_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await context.bot.ban_chat_member(chat_id, user_id, until_date=datetime.now() + timedelta(days=365))
         return
     
+    # Check CAS database
+    is_cas_banned = await check_cas_ban(user_id)
+    if is_cas_banned:
+        logger.info(f"CAS-banned user {user_id} attempted to join. Banning permanently.")
+        await context.bot.ban_chat_member(chat_id, user_id, until_date=datetime.now() + timedelta(days=365))
+        return
+    
     # Flood control: if too many pending captchas, temporary kick
     attempts = load_attempts()
     if len(attempts) >= MAX_PENDING_CAPTCHAS:
@@ -143,12 +213,26 @@ async def new_member_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # Load config
     config = load_config()
     
-    # Create keyboard (3x3 grid)
+    # Create adaptive keyboard based on number of options
     buttons = []
     options = config['button_options']
-    for i in range(0, len(options), 3):
-        row = [InlineKeyboardButton(opt, callback_data=f"captcha_{user_id}_{opt}") for opt in options[i:i+3]]
-        buttons.append(row)
+    num_options = len(options)
+    
+    # Determine grid layout
+    if num_options <= 3:
+        # Single row
+        buttons = [[InlineKeyboardButton(opt, callback_data=f"captcha_{user_id}_{opt}") for opt in options]]
+    elif num_options <= 6:
+        # 2 rows
+        cols = 3 if num_options > 4 else 2
+        for i in range(0, num_options, cols):
+            row = [InlineKeyboardButton(opt, callback_data=f"captcha_{user_id}_{opt}") for opt in options[i:i+cols]]
+            buttons.append(row)
+    else:
+        # 3+ rows, 3 columns
+        for i in range(0, num_options, 3):
+            row = [InlineKeyboardButton(opt, callback_data=f"captcha_{user_id}_{opt}") for opt in options[i:i+3]]
+            buttons.append(row)
     
     keyboard = InlineKeyboardMarkup(buttons)
     
@@ -182,7 +266,7 @@ async def new_member_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # Schedule timeout kick (1 minute)
     context.job_queue.run_once(
         timeout_kick,
-        60,
+        90,
         data={'chat_id': chat_id, 'user_id': user_id},
         name=f"timeout_{user_id}"
     )
@@ -190,16 +274,14 @@ async def new_member_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 # Handle captcha response
 async def captcha_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
     
     # Parse callback data
-    _, target_user_id, answer = query.data.split('_')
+    _, target_user_id, answer = query.data.split('_', 2)  # Use maxsplit=2 to handle answers with underscores
     target_user_id = int(target_user_id)
     
     # Only allow the target user to answer
     if query.from_user.id != target_user_id:
-        await query.answer("❌ Ce captcha n'est pas pour toi.", show_alert=True)
-        return
+        return  # Silently ignore, already answered
     
     chat_id = update.effective_chat.id
     config = load_config()
@@ -209,69 +291,52 @@ async def captcha_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_key not in attempts:
         return
     
-    # Check answer
-    if answer == config['correct_answer']:
-        # Correct! Unmute user
-        await context.bot.restrict_chat_member(
-            chat_id,
-            target_user_id,
-            permissions={
-                'can_send_messages': True,
-                'can_send_media_messages': True,
-                'can_send_polls': True,
-                'can_send_other_messages': True,
-                'can_add_web_page_previews': True,
-                'can_invite_users': True,
-                'can_pin_messages': True
-            }
-        )
+    # ALL answers are valid - unmute user
+    await context.bot.restrict_chat_member(
+        chat_id,
+        target_user_id,
+        permissions={
+            'can_send_messages': True,
+            'can_send_media_messages': True,
+            'can_send_polls': True,
+            'can_send_other_messages': True,
+            'can_add_web_page_previews': True,
+            'can_invite_users': True,
+            'can_pin_messages': True
+        }
+    )
+    
+    # Delete captcha message
+    try:
+        await context.bot.delete_message(chat_id, attempts[user_key]['message_id'])
+    except Exception as e:
+        logger.error(f"Failed to delete captcha message: {e}")
+    
+    # Check if this was the "best" answer for fun message
+    if 'best_answer' in config and answer == config['best_answer'] and 'fun_message' in config:
+        # Send fun message
+        user = query.from_user
+        username = f"@{user.username}" if user.username else user.first_name
+        fun_text = config['fun_message'].replace('{username}', username).replace('{user}', username)
         
-        # Delete captcha message
         try:
-            await context.bot.delete_message(chat_id, attempts[user_key]['message_id'])
+            fun_msg = await context.bot.send_message(chat_id, fun_text)
+            # Delete after 30 seconds
+            await asyncio.sleep(172800)  # 48 hours (48 * 60 * 60)
+            await context.bot.delete_message(chat_id, fun_msg.message_id)
         except Exception as e:
-            logger.error(f"Failed to delete captcha message: {e}")
-        
-        # Remove from attempts and cancel timeout
-        del attempts[user_key]
-        save_attempts(attempts)
-        
-        # Cancel timeout job
-        jobs = context.job_queue.get_jobs_by_name(f"timeout_{target_user_id}")
-        for job in jobs:
-            job.schedule_removal()
-        
-        logger.info(f"User {target_user_id} passed captcha.")
-    else:
-        # Wrong answer
-        attempts[user_key]['tries'] += 1
-        tries_left = 3 - attempts[user_key]['tries']
-        
-        if tries_left > 0:
-            await query.answer(f"❌ Mauvaise réponse. Il te reste {tries_left} tentative(s).", show_alert=True)
-            save_attempts(attempts)
-        else:
-            # Out of tries - kick and ban 24h
-            try:
-                await context.bot.delete_message(chat_id, attempts[user_key]['message_id'])
-            except Exception as e:
-                logger.error(f"Failed to delete captcha message: {e}")
-            
-            await context.bot.ban_chat_member(
-                chat_id,
-                target_user_id,
-                until_date=datetime.now() + timedelta(hours=24)
-            )
-            
-            del attempts[user_key]
-            save_attempts(attempts)
-            
-            # Cancel timeout job
-            jobs = context.job_queue.get_jobs_by_name(f"timeout_{target_user_id}")
-            for job in jobs:
-                job.schedule_removal()
-            
-            logger.info(f"User {target_user_id} failed captcha 3 times. Banned for 24h.")
+            logger.error(f"Failed to send/delete fun message: {e}")
+    
+    # Remove from attempts and cancel timeout
+    del attempts[user_key]
+    save_attempts(attempts)
+    
+    # Cancel timeout job
+    jobs = context.job_queue.get_jobs_by_name(f"timeout_{target_user_id}")
+    for job in jobs:
+        job.schedule_removal()
+    
+    logger.info(f"User {target_user_id} passed captcha with answer: {answer}")
 
 # Timeout kick after 1 minute
 async def timeout_kick(context: ContextTypes.DEFAULT_TYPE):
