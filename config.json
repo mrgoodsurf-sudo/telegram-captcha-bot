@@ -2,6 +2,13 @@
   "image_path": "captcha.png",
   "best_answer": "42",
   "fun_message": "🎉 Bravo {username} ! Tu as trouvé LA réponse à la question universelle ! 🚀",
-  "button_options": ["Oui", "Café", "42", "Oups", "Attends je l'ai'", "Bleu"],
+  "button_options": ["Oui", "Café", "42", "Oups", "Attends je l'ai", "Bleu"],
   "welcome_message": "Bienvenue ! Merci de répondre à cette difficile question (toutes réponses acceptées) 1 Minute max, nouvel essai dans 24H"
+  "spam_patterns": [
+    "@TRADER_FELIXFX",
+    "@Trader_Felixfx",
+    "I am looking for 2–3 people to participate in a new project. The work will be done remotely, and the conditions are transparent",
+    "t.me/TRADER_FELIXFX",
+    "trader_felixfx"
+    ]
 }

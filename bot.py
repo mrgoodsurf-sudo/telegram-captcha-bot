@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 CONFIG_FILE = "config.json"
 ATTEMPTS_FILE = "attempts.json"
 BLACKLIST_FILE = "blacklist.csv"
+POSTED_USERS_FILE = "posted_users.json"
 
 # Flood control
 CAPTCHA_DELAY = 3  # seconds between each captcha
@@ -129,6 +130,47 @@ def load_attempts():
 def save_attempts(attempts):
     with open(ATTEMPTS_FILE, 'w') as f:
         json.dump(attempts, f, indent=2)
+
+# Load posted users
+def load_posted_users():
+    if not os.path.exists(POSTED_USERS_FILE):
+        return []
+    with open(POSTED_USERS_FILE, 'r') as f:
+        return json.load(f)
+
+# Save posted users
+def save_posted_users(users):
+    with open(POSTED_USERS_FILE, 'w') as f:
+        json.dump(users, f, indent=2)
+
+# Check first message for spam
+async def check_first_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.text:
+        return
+    
+    user_id = update.message.from_user.id
+    posted_users = load_posted_users()
+    
+    if user_id in posted_users:
+        return
+    
+    config = load_config()
+    spam_patterns = config.get('spam_patterns', [])
+    message_lower = update.message.text.lower()
+    
+    for pattern in spam_patterns:
+        if pattern.lower() in message_lower:
+            chat_id = update.effective_chat.id
+            logger.warning(f"Spam detected from user {user_id}: pattern '{pattern}'")
+            try:
+                await update.message.delete()
+                await context.bot.ban_chat_member(chat_id, user_id, until_date=datetime.now() + timedelta(hours=24))
+            except Exception as e:
+                logger.error(f"Failed to ban spammer {user_id}: {e}")
+            return
+    
+    posted_users.append(user_id)
+    save_posted_users(posted_users)
 
 # Handle new member with flood control
 async def new_member_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -398,6 +440,7 @@ def main():
     # Handlers
     application.add_handler(ChatMemberHandler(new_member_handler, ChatMemberHandler.CHAT_MEMBER))
     application.add_handler(CallbackQueryHandler(captcha_callback, pattern=r'^captcha_'))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, check_first_message))
     application.add_handler(MessageHandler(filters.StatusUpdate.ALL, delete_service_messages))
     
     logger.info("Bot Damoclès démarré.")
