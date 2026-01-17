@@ -156,8 +156,23 @@ async def check_first_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     config = load_config()
     spam_patterns = config.get('spam_patterns', [])
-    message_lower = update.message.text.lower()
+    message_text = update.message.text
+    message_lower = message_text.lower()
     
+    # Check for multiple Telegram links
+    import re
+    telegram_links = re.findall(r't\.me/[^\s]+', message_lower)
+    if len(telegram_links) >= 2:
+        chat_id = update.effective_chat.id
+        logger.warning(f"Multiple Telegram links detected from user {user_id} ({len(telegram_links)} links)")
+        try:
+            await update.message.delete()
+            await context.bot.ban_chat_member(chat_id, user_id, until_date=datetime.now() + timedelta(hours=24))
+        except Exception as e:
+            logger.error(f"Failed to ban multi-link spammer {user_id}: {e}")
+        return
+    
+    # Check spam patterns
     for pattern in spam_patterns:
         if pattern.lower() in message_lower:
             chat_id = update.effective_chat.id
