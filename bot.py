@@ -305,10 +305,10 @@ async def new_member_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     }
     save_attempts(attempts)
     
-    # Schedule timeout kick (1 minute)
+    # Schedule timeout kick (2 minutes)
     context.job_queue.run_once(
         timeout_kick,
-        60,
+        120,
         data={'chat_id': chat_id, 'user_id': user_id},
         name=f"timeout_{user_id}"
     )
