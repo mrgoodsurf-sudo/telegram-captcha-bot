@@ -455,7 +455,7 @@ def main():
     # Handlers
     application.add_handler(ChatMemberHandler(new_member_handler, ChatMemberHandler.CHAT_MEMBER))
     application.add_handler(CallbackQueryHandler(captcha_callback, pattern=r'^captcha_'))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, check_first_message))
+    application.add_handler(MessageHandler(filters.TEXT, check_first_message))
     application.add_handler(MessageHandler(filters.StatusUpdate.ALL, delete_service_messages))
     
     logger.info("Bot Damoclès démarré.")
